@@ -178,10 +178,505 @@ Wx::Socket - wxSocket* classes
 
   }
 
+=head1 USAGE (Part 2)
+
+	## 
+	## the following is some rough documentation of how I used the wx::socket's module
+	## it may not be structed as intended, but it does seem to work
+	## i have borrowed other comments from other documentation, my apologies if I did not properly cite your POD.
+	##
+	
+	
+	# my main caller method:
+	# Note, that I am using the Wx server as the end-point display of 2 or more POE data transfer servers
+	# thus, I have a data handling class/object that takes care of the standardized data methods and server config
+
+	#!perl
+	use strict;
+	use warnings;
+
+	use Wx;
+	use MySys::DisplayApp;
+	use MySys::Display::DFrame;
+	use MySys::Display::FDisplay;
+	use MySys::DataManager;
+	@MySys::Display::FDisplay::ISA = qw(MySys::Display);
+
+	use IO::Socket;
+	use IO::Socket::INET;
+	use Socket;
+
+	use POE qw(Wheel::SocketFactory
+	  Wheel::ReadWrite
+	  Driver::SysRW
+	  Filter::Reference
+	);
+
+	## config globals...
+
+	package main;
+	my($app) = DisplayApp->new();
+	$app->MainLoop();
+
+=head1 USAGE (Part 3)
+
+	# the DisplayApp
+	# my primary data handling class/object is created here
+
+	package DisplayApp;
+	#######################################
+	#
+	#######################################
+	use strict;
+	use warnings;
+	use vars qw(@ISA);
+	@ISA = qw(Wx::App);
+	@MySys::Display::FDisplay::ISA = qw(MySys::Display);
+	$my_server_address = '127.0.0.1';
+	$my_server_port = 60000;
+	
+	sub OnInit {
+		my($this) = @_;
+		
+		$data_handler = DataManager->new();
+
+		# Note, that the $data_handler is an extra argument tucked onto the ->new() statement :-)
+		my($frame) = DFrame->new( undef, -1, "MySys",undef,undef,undef,undef,$data_handler);
+
+		$frame->init($data_handler,$my_server_address,$my_server_port);
+		
+		#   set frame to be visible..
+		#   Setting to 0 hides the frame.
+		$frame->Show(1);
+		
+		# Not needed by my display process...
+		#$this->SetTopWindow($frame);
+
+		# if OnInit doesn't return true, the application exits immediately.
+		return 1;
+	}
+
+	1;
+
+=head1 USAGE (Part 4)
+
+	# the frame (class)
+	# the primary event configuration and control center
+	
+	package PFrame;
+	#######################################
+	#
+	#######################################
+	#   This package overrides Wx::Frame, and allows us to put controls
+	#   in the frame.
+	#
+	use strict;
+	use warnings;
+	use vars qw(@ISA);
+	@ISA = qw(Wx::Frame);
+	@MySys::Display::FDisplay::ISA = qw(MySys::Display);
   
+	#
+	#  pick the constants you need
+	# :socket must be brought in to declare a new socket
+	#
+	use Wx qw(:id
+			  :toolbar
+			  :socket
+			  wxNullBitmap
+			  wxDefaultPosition
+			  wxDefaultSize
+			  wxDefaultPosition
+			  wxDefaultSize
+			  wxNullBitmap
+			  wxTB_VERTICAL
+			  wxSIZE
+			  wxSOCKET_WAITALL
+			  wxTE_MULTILINE
+			  wxBITMAP_TYPE_BMP
+	);
+
+	#	NOTES, by others...
+	#   Wx::Events allows us to attach events to user's actions.
+	#   EVT_SIZE for resizing a window
+	#   EVT_MENU for selecting a menu item
+	#   EVT_COMBOBOX for selecting a combo box item
+	#   EVT_TOOL_ENTER for selecting toolbar items
+	#
+	#  the socket events must be declared to make the events work...
+	use Wx::Event qw(EVT_SIZE
+					 EVT_MENU
+					 EVT_SOCKET_CONNECTION
+					 EVT_SOCKET_INPUT
+					 EVT_SOCKET_OUTPUT
+					 EVT_SOCKET_LOST
+					 EVT_IDLE
+					 EVT_COMBOBOX
+					 EVT_UPDATE_UI
+					 EVT_TOOL_ENTER
+	);
+	
+	#  declare use of Wx::Socket per USAGE part 1
+	#  :SocketServer and :SocketBase are needed for socket calls to work
+	use Wx::Socket qw(:SocketServer
+						:SocketBase
+	#					wxSOCKET_WAITALL
+						wxSOCKET_NOWAIT
+						SetFlags
+						);
+
+	## kludgy, but the pointers to the two main data objects are stored here 
+	## so they can be accessed by all methods
+	my $display_obj = undef;
+	my $data_manager_obj = undef;
+
+	## YAML is used for the data transfer protocol
+	## the final data packet gets filtered into a hash variable,
+	## that is then loaded into the data_manager
+	my $yaml = 'YAML';
+	my $ref_filter = POE::Filter::Reference->new($yaml);
+
+	## The only functional socket flag under windows appears to be wxSOCKET_NOWAIT
+	## This was not investigated fully but the other flags appear to block the data input
+	## (likely because the Wx server does not know that it is finished)
+	## so wxSOCKET_NOWAIT returns the buffer immediately and the data packet is built in a local method - like a buffer container.
+	## FYI, the POE Yaml filter will not work without a complete data packet.
+	my $buffer_container = '';
+	my $buffer_processed = 0;
+
+	sub new {
+		my( $class ) = shift;
+		my @class_params = @_;
+
+		## inputs to window/frame creation
+		## cannot use the class_params in their 'raw' hash  because we need to retrieve the $data_handler object
+		my @super_params = ();
+		my $data_handler = undef;
+		if($class_params[7]=~/HASH/i) {
+			## this is the data handler object
+			$data_handler = $class_params[7];
+		}
+		for(my $c=0; $c<7; $c++) {
+		
+			## stuff left out here ...
+			## a config file is opened to load window parameters
+			## ...your method may vary
+			$super_params[$c] = $class_params[$c];
+		}
+
+		# the frame object is created with the SUPER params
+		my( $this ) = $class->SUPER::new( @super_params );
+
+		## store the data handler
+		$this->_data_handler($data_handler);
+
+		return $this;
+	}
+
+	sub init {
+		## still using 'this'....
+		my $this = shift;
+		my $data_handler = shift; ## somewhat redundant
+		my $my_server_address = shift;
+		my $my_server_port = shift;
+	
+		# Create a new Display object, and store it locally
+		my $display = FDisplay->new( $this );
+		$this->_display_handle($display);
+
+		## the display uses the Wx::Grid package...mostly handy and relatively easy to use
+		## I use three steps: 1) create the grid in the frame window, 2) format the grid,
+		## and, 3) format the cells in the grid. That just makes it less messy for me.
+		$display->start_grid($data_handler,$this);
+		$display->format_grid($data_handler);
+		$display->format_cells($data_handler);
+	
+		## create the socket object, per the USAGE part 1
+		my $sock = Wx::SocketServer->new($my_server_address,$my_server_port);
+		
+		## I set the ..._NOWAIT flag separately...preference only
+		## As noted above - this is the only flag that seems to actually allow the GUI display to show incoming data
+		$sock->SetFlags(wxSOCKET_NOWAIT);
+
+		## make a socket event tie to the 'onConnect' method
+		## Note, that attempting to tie an input event to the 'onInput' method will not work within the 'init' method...
+		EVT_SOCKET_CONNECTION($this,$sock,\&onConnect);
+
+		# do a socket check...
+		if(!$sock->Ok) { print "\nERROR! Not able to make socket connection on[$my_server_address : $my_server_port]\n\n"; }
+	
+		return 1;
+	}
+	## helper methods
+	sub _display_handle {
+		## using perlish 'self' now
+		my $self = shift;
+		if(@_) { $display_obj = shift; }
+		return $display_obj;
+	}
+	sub _data_handler {
+		my $self = shift;
+		if(@_) { $data_manager_obj = shift; }
+		return $data_manager_obj;
+	}
+	sub show_data {
+		my $self = shift;
+		my $data_handler = shift;
+		
+		## data is 'stacked' inside the data-handler object so this is sent to the display object
+		## first, fetch the display object
+		my $display = $self->_display_handle();
+		
+		$display->show_data($data_handler);
+		
+		return 1;
+	}
+
+	sub onConnect {
+		## 'this' is back....
+		## this method is mostly the same as under USAGE part 1
+		my ($sock, $this, $evt) = @_;
+		my $server_handle = $sock->Accept(0);
+
+		## !! Set here, the tie between the socket server INPUT-event and the 'onInput' method
+		EVT_SOCKET_INPUT($this,$server_handle,\&onInput);
+
+		## check and/or use...
+		my ($peer_host, $peer_port) = $server_handle->GetPeer;
+
+		## a hole thru the encapsulation...
+		my $data_handler = $this->_data_handler();
+
+		## my data transfer process requires a 'welcome' connection trigger
+		my $send = {};
+		$send->{state} = "welcome";
+		$send->{mess} = "send me data";
+	
+		####
+		## package the send (info request) hash array into a Yaml stream - formatted for a POE server
+		## this method is located in the data_handler object...your coding may vary.
+		####
+		my $req_send = $data_handler->format_POE_Yaml_send($send);
+	
+		####
+		## write the info request data package to the socket
+		####
+		## make a Write() on the server handle to trigger data sending
+		$server_handle->Write( $req_send, length($req_send));
+	
+		return;
+	}
+	sub onInput {
+		## 'this' again...
+		my ($server_handle, $this, $evt) = @_;
+
+		my $data_handler = $this->_data_handler();
+
+		my $done = $this->read_data_onto_stack($data_handler,$server_handle);
+
+		if($done) {
+			## to use for packet confirm...
+			my $send = {};
+			$send->{state} = "confirm";
+			$send->{mess} = "send me more";
+
+			my $req_send = $node->format_POE_Yaml_send($send);
+
+			$server_handle->Write( $req_send, length($req_send));
+			$buffer_processed = 0;
+		}
+	
+		return;
+	}
+	sub read_data_onto_stack {
+		my $self = shift;
+		my $data_handler = shift;
+		my $server_handle = shift;
+	
+		## there are probably better ways to structure this data stacking process
+		## the following is just my example - which I understand :-)
+		## the peek'ing may not be necessary
+		## the buffer reading process in the SocketServer appears to augment the 
+		## input event Read's with an extra input event that is zero length.
+		
+		my $buffer_empty = 0;
+		$server_handle->Peek(my $check, 1024);
+		if(length($check) < 1024) { $buffer_empty = 1; }
+	
+		while ($server_handle->Read(my $buffer, 1024)) {
+			## small method to add new data to buffer container
+			$self->join_buffer($buffer);
+		}
+
+		my $ct = 0;
+		if($buffer_empty && length($buffer_cont)) {
+			## process the entire data packet onto a data_handler stack
+			$ct = $self->process_packet($data_handler);
+			$buffer_empty = 0;
+		}
+		return $ct;
+	}
+
+	1;
+
+=head1 USAGE (Part 4)
+
+	# the display (class)
+	
+	package FDisplay;
+	#######################################
+	#
+	#
+	use strict;
+	use warnings;
+	my $carp_for_testing = 1;
+
+	use vars qw(@ISA);	
+	use Wx qw(:everything);
+
+	## declare wx-grid to use to structure the on-screen tabular data
+	use Wx::Grid;
+	@ISA = qw(Wx::Grid);
+
+	## standard perl object declaration...
+	sub new {
+		my $proto = shift;
+		my $class = ref($proto) || $proto;
+		my $self  = {};
+		$self->{NAME}     = undef;
+		$self->{BASE_DIR} = "c:/MyApp/";
+		$self->{CONFIG_FILE} = 'sDisplayConfigure.yml';
+		$self->{CONFIG_DIR} = 'server_conf/';
+		$self->{DISPLAY_SETTINGS} = {};
+		$self->{DISPLAY_GRID} = undef;
+		bless ($self, $class);
+		return $self;
+	}
+	sub _grid_handle {
+		my $self = shift;
+		if(@_) { $self->{DISPLAY_GRID} = shift; }
+		return $self->{DISPLAY_GRID};
+	}
+	sub start_grid {
+		my $self = shift;
+		my $data_handler = shift;
+		my $winframe = shift;
+		
+		## my method to retrieve display config settings :)
+		my $display_settings = $data_handler->display_settings();
+
+		## defaults
+		... $rows, $cols ...
+		
+		## set settings from $display_settings
+		....
+		
+		my $grid = Wx::Grid->new(
+			$winframe, 						#parent
+			-1, 							#id
+			[$start_pos_x, $start_pos_y], 	#position
+			[$dim_x, $dim_y] 				#dimensions
+		);
+		
+		## store handle to grid object
+		$self->_grid_handle($grid);
+		
+		$grid->CreateGrid(
+			$rows, #rows
+			$cols #cols
+		);
+		return 1;
+	}
+	sub format_grid {
+		my $self = shift;
+		my $data_handler = shift;
+		my $grid = $self->_grid_handle();
+
+		my $display_settings = $data_handler->display_settings();
+
+		## defaults
+		... $rows, $cols ...
+		
+		## set settings from $display_settings
+		....
+		
+		## sample of possible grid tools
+		my $font = Wx::Font->new($font_size, wxFONTFAMILY_ROMAN, wxNORMAL, wxNORMAL);
+		
+		$grid->SetColLabelSize($head_col_ht);
+		$grid->SetRowLabelSize($row_label_wd);
+		$grid->SetLabelFont($font);
+		$grid->SetDefaultCellAlignment(wxALIGN_CENTRE,wxALIGN_CENTRE);
+
+		return 1;
+	}
+
+	sub format_cells {
+		my $self = shift;
+		my $data_handler = shift;
+		my $grid = $self->_grid_handle();
+
+		my $display_settings = $data_handler->display_settings();
+
+		## defaults
+		... $rows, $cols ...
+		
+		## set settings from $display_settings
+		....
+
+		## sample of possible grid tools
+		my $font = Wx::Font->new($font_size, wxFONTFAMILY_SWISS, wxNORMAL, wxNORMAL);
+
+		$grid->SetDefaultRowSize($row_ht,1);
+		$grid->SetDefaultCellFont($font);
+		$grid->SetRowMinimalHeight(0,$first_row_ht);
+		$grid->SetRowSize(0,$first_row_ht);
+		return 1;
+	}
+	sub show_data {
+		my $self = shift;
+		my $data_handler = shift;
+		my $grid = $self->_grid_handle();
+
+		my $display_settings = $data_handler->display_settings();
+
+		## defaults
+		... $rows, $cols ...
+		
+		## set settings from $display_settings
+		....
+
+		## get some stacked data...and/or keys
+		my $d_stack = $data_handler->display_data();
+		my $key_stack = $data_handler->key_control();
+
+		## sample of possible grid tools
+		my $font = Wx::Font->new($font_size, wxFONTFAMILY_SWISS, wxNORMAL, wxNORMAL);
+
+		## loop rows and columns (not shown)
+		$grid->SetCellValue($s, $col, $cell_value);
+		$grid->SetCellAlignment($s,$col,wxALIGN_CENTRE,wxALIGN_CENTRE);
+		$grid->SetRowSize($first_row_ht,1);
+		if($s) {
+			$grid->SetCellFont($s,$col,$font);
+		} else {
+			$grid->SetCellFont($s,$col,$first_font);
+		}
+
+		$grid->SetCellTextColour(2, 0, Wx::Colour->new(255,0,0));
+		$grid->SetCellBackgroundColour(2, 0, Wx::Colour->new(255,255,128));
+		$grid->SetColFormatFloat(0, 0, 2);
+		$grid->SetReadOnly(1, 0);
+		return 1;
+	}
+	
+	
 =head1 METHODS
 
-All the methods work as in wxWidgets (see the documentation).
+All the methods work as in wxWidgets (see the documentation). [Note that the wxWidgets code has been actively developed
+and this module has been static since 2003. But this package only uses the main function of wxsocket...so it works if you 
+only need a simple socket listener.]
+
 
 The functions for reading data (Read, ReadMsg, Peek) take 3 arguments,
 like the Perl read() function:
